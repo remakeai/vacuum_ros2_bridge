@@ -1,0 +1,5 @@
+# Set LED state (0-18)
+uint8 state
+---
+bool success
+string message

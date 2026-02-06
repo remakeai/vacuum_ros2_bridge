@@ -1,0 +1,12 @@
+# vacuum_ros2_bridge parameters
+
+vacuum_bridge:
+  ros__parameters:
+    # Connection settings
+    robot_ip: "192.168.1.143"  # IP address of vacuum running SangamIO
+    robot_port: 5555            # SangamIO TCP port
+
+    # Frame IDs
+    frame_id: "base_link"       # Robot base frame
+    odom_frame_id: "odom"       # Odometry frame
+    lidar_frame_id: "laser"     # LiDAR frame

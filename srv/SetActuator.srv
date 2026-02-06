@@ -1,0 +1,7 @@
+# Set actuator speed
+# component: "vacuum", "main_brush", "side_brush", "water_pump"
+string component
+uint8 speed  # 0-100%, 0 = off
+---
+bool success
+string message
