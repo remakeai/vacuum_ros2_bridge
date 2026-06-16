@@ -29,8 +29,21 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   DEPENDENCIES std_msgs
 )
 
-# Install Python modules
-ament_python_install_package(${PROJECT_NAME})
+# Install the hand-written Python module(s) into the same importable package
+# that rosidl_generate_interfaces() above already creates for this project, so
+# `from vacuum_ros2_bridge.sangamio_client import ...` resolves alongside
+# `from vacuum_ros2_bridge.msg import ...`.
+#
+# NOTE: we intentionally do NOT call ament_python_install_package(${PROJECT_NAME})
+# here. rosidl already registers a Python package install under the project name,
+# and a second registration collides on the ament_cmake_python_* custom targets
+# (e.g. ament_cmake_python_symlink_vacuum_ros2_bridge), which breaks the build
+# under `colcon build --symlink-install`. We install the .py file directly
+# instead. (__init__.py is provided by the generated package.)
+install(FILES
+  ${PROJECT_NAME}/sangamio_client.py
+  DESTINATION ${PYTHON_INSTALL_DIR}/${PROJECT_NAME}
+)
 
 # Install Python scripts
 install(PROGRAMS
