@@ -1,6 +1,6 @@
 # vacuum_ros2_bridge
 
-ROS2 Jazzy bridge for SangamIO vacuum robot controller. This package enables communication between ROS2 PC and vacuum robots running the SangamIO firmware (part of [VacuumTiger](https://github.com/codetiger/VacuumTiger)).
+ROS2 Jazzy bridge for 3irobotix CRL200-based vacuum robot cleaners. This package enables communication between ROS2 PC and vacuum using a SangamIO firmware shim (part of [VacuumTiger](https://github.com/codetiger/VacuumTiger)). Read [step-by-step setup tutorial](https://makerspet.com/blog/tutorial-connect-robot-vacuum-cleaner-to-ros-2-proscenic-m6-pro/).
 
 ## Overview
 
