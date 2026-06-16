@@ -1,6 +1,6 @@
 # vacuum_ros2_bridge
 
-ROS2 Jazzy bridge for SangamIO vacuum robot controller. This package enables communication between ROS2 and vacuum robots running the SangamIO firmware (part of [VacuumTiger](https://github.com/codetiger/VacuumTiger)).
+ROS2 Jazzy bridge for SangamIO vacuum robot controller. This package enables communication between ROS2 PC and vacuum robots running the SangamIO firmware (part of [VacuumTiger](https://github.com/codetiger/VacuumTiger)).
 
 ## Overview
 
@@ -9,6 +9,8 @@ The bridge connects to [SangamIO](https://github.com/codetiger/VacuumTiger) via 
 - **Sensor data**: LiDAR scans, IMU, wheel odometry, bumpers, cliffs, battery status
 - **Actuator control**: Drive motors, vacuum, brushes, water pump, LEDs
 - **Standard interfaces**: Uses `sensor_msgs`, `geometry_msgs`, `nav_msgs` for compatibility with the ROS2 ecosystem
+
+<img width="1024" height="1024" alt="proscenic_m6_pro_ros2_floor-1024x1024" src="https://github.com/user-attachments/assets/162ab9e1-c27c-4ef7-b685-2c03b275a691" />
 
 ## Prerequisites
 
