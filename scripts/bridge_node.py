@@ -74,9 +74,12 @@ class VacuumBridgeNode(Node):
         self.client.on_sensor_update(self._on_sensor_update)
         self.client.on_lidar_scan(self._on_lidar_scan)
 
-        # QoS profiles
+        # QoS profiles. Use RELIABLE so the topics are compatible with the
+        # default (reliable) subscribers in the Kaia.ai stack (cartographer,
+        # nav2, RViz, robot_localization EKF). A reliable publisher also serves
+        # best-effort subscribers, so this is the most compatible choice.
         sensor_qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
+            reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
             depth=10
         )
