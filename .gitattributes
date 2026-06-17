@@ -1,0 +1,7 @@
+# Normalize line endings. Scripts MUST be LF so their `#!/usr/bin/env python3`
+# shebangs work when the package is built/run on Linux (e.g. the Docker image);
+# CRLF turns the interpreter into `python3\r` and the node fails with exit 127.
+* text=auto
+*.py   text eol=lf
+*.sh   text eol=lf
+*.bash text eol=lf
