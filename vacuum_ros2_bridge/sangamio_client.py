@@ -82,24 +82,45 @@ class SensorData:
 class SangamIOClient:
     """Client for communicating with SangamIO daemon."""
 
-    def __init__(self, host: str, port: int = 5555):
+    def __init__(self, host: str, port: int = 5555, udp_port: Optional[int] = None):
         self.host = host
         self.port = port
+        # SangamIO streams sensor/LiDAR telemetry over UDP (not TCP) to the
+        # client's IP on the same port as the TCP command connection. See
+        # SangamIO main.rs: udp_addr = SocketAddr::new(client_ip, udp_streaming_port),
+        # where udp_streaming_port defaults to the TCP bind port. TCP is
+        # commands-only and its open connection registers us for UDP streaming.
+        self.udp_port = udp_port if udp_port is not None else port
         self.socket: Optional[socket.socket] = None
+        self.udp_socket: Optional[socket.socket] = None
         self.running = False
         self.recv_thread: Optional[threading.Thread] = None
+        self.udp_thread: Optional[threading.Thread] = None
         self.sensor_data = SensorData()
         self.lock = threading.Lock()
         self.callbacks: Dict[str, Callable] = {}
 
     def connect(self) -> bool:
-        """Connect to SangamIO daemon."""
+        """Connect to SangamIO daemon.
+
+        Binds the UDP telemetry socket first (so no packets are missed once
+        streaming starts), then opens the TCP command connection, which
+        registers this client for UDP streaming.
+        """
         try:
+            # Bind UDP telemetry receiver before registering via TCP.
+            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.udp_socket.bind(("0.0.0.0", self.udp_port))
+            self.udp_socket.settimeout(1.0)
+
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.settimeout(5.0)
             self.socket.connect((self.host, self.port))
             self.socket.settimeout(None)
-            logger.info(f"Connected to SangamIO at {self.host}:{self.port}")
+            logger.info(
+                f"Connected to SangamIO at {self.host}:{self.port} "
+                f"(UDP telemetry on :{self.udp_port})")
             return True
         except Exception as e:
             logger.error(f"Failed to connect to SangamIO: {e}")
@@ -110,19 +131,30 @@ class SangamIOClient:
         self.running = False
         if self.recv_thread:
             self.recv_thread.join(timeout=2.0)
+        if self.udp_thread:
+            self.udp_thread.join(timeout=2.0)
         if self.socket:
             try:
                 self.socket.close()
             except:
                 pass
             self.socket = None
+        if self.udp_socket:
+            try:
+                self.udp_socket.close()
+            except:
+                pass
+            self.udp_socket = None
         logger.info("Disconnected from SangamIO")
 
     def start_receiving(self):
-        """Start background thread to receive sensor data."""
+        """Start background threads for the command channel (TCP) and the
+        sensor telemetry stream (UDP)."""
         self.running = True
         self.recv_thread = threading.Thread(target=self._receive_loop, daemon=True)
         self.recv_thread.start()
+        self.udp_thread = threading.Thread(target=self._udp_receive_loop, daemon=True)
+        self.udp_thread.start()
 
     def on_sensor_update(self, callback: Callable[[str, SensorData], None]):
         """Register callback for sensor updates."""
@@ -163,6 +195,29 @@ class SangamIOClient:
                 if self.running:
                     logger.error(f"Receive error: {e}")
                 break
+
+    def _udp_receive_loop(self):
+        """Background thread to receive sensor telemetry over UDP.
+
+        Each datagram is one complete message in the same wire format used on
+        TCP: a 4-byte big-endian length prefix followed by the protobuf payload
+        (see SangamIO udp_publisher.rs). UDP is message-oriented, so there is
+        exactly one length-prefixed message per datagram.
+        """
+        while self.running and self.udp_socket:
+            try:
+                datagram, _addr = self.udp_socket.recvfrom(65535)
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if self.running:
+                    logger.error(f"UDP receive error: {e}")
+                break
+
+            if len(datagram) < 4:
+                continue
+            msg_len = struct.unpack('>I', datagram[:4])[0]
+            self._parse_message(datagram[4:4 + msg_len])
 
     def _parse_message(self, data: bytes):
         """Parse a protobuf message from SangamIO.
