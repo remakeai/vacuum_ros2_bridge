@@ -117,6 +117,11 @@ class VacuumBridgeNode(Node):
         self.theta = 0.0
         self.last_odom_time = None
 
+        # LiDAR scan timing: measure the real rotation period from the interval
+        # between consecutive full scans, rather than assuming a fixed 5 Hz.
+        self.last_scan_time = None
+        self.scan_period = 0.2  # seconds; seeded at ~5 Hz, updated from measurement
+
         # Connect to robot
         self.get_logger().info(f'Connecting to SangamIO at {robot_ip}:{robot_port}...')
         if self.client.connect():
@@ -152,7 +157,17 @@ class VacuumBridgeNode(Node):
         if not points:
             return
 
-        now = self.get_clock().now().to_msg()
+        now_time = self.get_clock().now()
+        now = now_time.to_msg()
+
+        # Measure the real scan period from the interval between full scans.
+        # The LiDAR RPM (and thus scan rate) is not guaranteed to be exactly 5 Hz,
+        # and reporting the true period lets cartographer deskew correctly.
+        if self.last_scan_time is not None:
+            dt = (now_time - self.last_scan_time).nanoseconds / 1e9
+            if 0.02 < dt < 2.0:  # ignore startup gaps / outliers
+                self.scan_period = dt
+        self.last_scan_time = now_time
 
         msg = LaserScan()
         msg.header.stamp = now
@@ -162,8 +177,8 @@ class VacuumBridgeNode(Node):
         msg.angle_min = 0.0
         msg.angle_max = 2.0 * math.pi
         msg.angle_increment = 2.0 * math.pi / 360  # ~1 degree
-        msg.time_increment = 0.0  # Not available
-        msg.scan_time = 1.0 / 5.0  # ~5 Hz
+        msg.scan_time = self.scan_period  # measured rotation period
+        msg.time_increment = self.scan_period / 360.0  # per-bin time over one revolution
         msg.range_min = 0.15  # 15 cm
         msg.range_max = 8.0  # 8 m
 
