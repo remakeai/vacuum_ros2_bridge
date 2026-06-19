@@ -7,6 +7,7 @@ Protocol:
 """
 
 import socket
+import select
 import struct
 import threading
 import time
@@ -91,28 +92,65 @@ class SangamIOClient:
         # where udp_streaming_port defaults to the TCP bind port. TCP is
         # commands-only and its open connection registers us for UDP streaming.
         self.udp_port = udp_port if udp_port is not None else port
+        # Reconnect if no UDP telemetry arrives for this long (seconds).
+        self.telemetry_timeout = 3.0
         self.socket: Optional[socket.socket] = None
         self.udp_socket: Optional[socket.socket] = None
         self.running = False
-        self.recv_thread: Optional[threading.Thread] = None
-        self.udp_thread: Optional[threading.Thread] = None
+        self.connected = False
+        self.last_rx_time = 0.0
+        self.worker: Optional[threading.Thread] = None
         self.sensor_data = SensorData()
         self.lock = threading.Lock()
+        self.send_lock = threading.Lock()
         self.callbacks: Dict[str, Callable] = {}
 
-    def connect(self) -> bool:
-        """Connect to SangamIO daemon.
+    def on_sensor_update(self, callback: Callable[[str, SensorData], None]):
+        """Register callback for sensor updates."""
+        self.callbacks['sensor'] = callback
 
-        Binds the UDP telemetry socket first (so no packets are missed once
-        streaming starts), then opens the TCP command connection, which
-        registers this client for UDP streaming.
-        """
+    def on_lidar_scan(self, callback: Callable[[list, float], None]):
+        """Register callback for LiDAR scans."""
+        self.callbacks['lidar'] = callback
+
+    def on_status(self, callback: Callable[[bool], None]):
+        """Register a connection-status callback, called with True on connect
+        and False on disconnect."""
+        self.callbacks['status'] = callback
+
+    def start(self):
+        """Start the self-healing connection worker: connects to SangamIO and
+        keeps both the TCP command channel and the UDP telemetry stream alive,
+        reconnecting with backoff if the connection closes or telemetry stalls."""
+        if self.running:
+            return
+        self.running = True
+        self.worker = threading.Thread(target=self._worker, daemon=True)
+        self.worker.start()
+
+    # Backwards-compatible aliases (older callers used connect()+start_receiving()).
+    def connect(self) -> bool:
+        self.start()
+        return True
+
+    def start_receiving(self):
+        self.start()
+
+    def disconnect(self):
+        """Stop the worker and close the sockets."""
+        self.running = False
+        if self.worker and self.worker is not threading.current_thread():
+            self.worker.join(timeout=3.0)
+        self._close_sockets()
+        logger.info("Disconnected from SangamIO")
+
+    def _open(self) -> bool:
+        """Bind the UDP telemetry socket, then open the TCP command connection
+        (which registers this client for UDP streaming). Returns True on success."""
         try:
-            # Bind UDP telemetry receiver before registering via TCP.
             self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.udp_socket.bind(("0.0.0.0", self.udp_port))
-            self.udp_socket.settimeout(1.0)
 
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.settimeout(5.0)
@@ -123,101 +161,93 @@ class SangamIOClient:
                 f"(UDP telemetry on :{self.udp_port})")
             return True
         except Exception as e:
-            logger.error(f"Failed to connect to SangamIO: {e}")
+            logger.warning(f"Connect to SangamIO failed: {e}")
+            self._close_sockets()
             return False
 
-    def disconnect(self):
-        """Disconnect from SangamIO."""
-        self.running = False
-        if self.recv_thread:
-            self.recv_thread.join(timeout=2.0)
-        if self.udp_thread:
-            self.udp_thread.join(timeout=2.0)
-        if self.socket:
-            try:
-                self.socket.close()
-            except:
-                pass
-            self.socket = None
-        if self.udp_socket:
-            try:
-                self.udp_socket.close()
-            except:
-                pass
-            self.udp_socket = None
-        logger.info("Disconnected from SangamIO")
+    def _close_sockets(self):
+        for attr in ('socket', 'udp_socket'):
+            s = getattr(self, attr)
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+            setattr(self, attr, None)
 
-    def start_receiving(self):
-        """Start background threads for the command channel (TCP) and the
-        sensor telemetry stream (UDP)."""
-        self.running = True
-        self.recv_thread = threading.Thread(target=self._receive_loop, daemon=True)
-        self.recv_thread.start()
-        self.udp_thread = threading.Thread(target=self._udp_receive_loop, daemon=True)
-        self.udp_thread.start()
+    def _set_connected(self, value: bool):
+        if value != self.connected:
+            self.connected = value
+            cb = self.callbacks.get('status')
+            if cb:
+                try:
+                    cb(value)
+                except Exception:
+                    pass
 
-    def on_sensor_update(self, callback: Callable[[str, SensorData], None]):
-        """Register callback for sensor updates."""
-        self.callbacks['sensor'] = callback
-
-    def on_lidar_scan(self, callback: Callable[[list, float], None]):
-        """Register callback for LiDAR scans."""
-        self.callbacks['lidar'] = callback
-
-    def _receive_loop(self):
-        """Background thread to receive and parse messages."""
-        buffer = bytearray()
-
-        while self.running and self.socket:
-            try:
-                # Receive data
-                data = self.socket.recv(4096)
-                if not data:
-                    logger.warning("Connection closed by SangamIO")
-                    break
-
-                buffer.extend(data)
-
-                # Parse complete messages (length-prefixed protobuf)
-                while len(buffer) >= 4:
-                    msg_len = struct.unpack('>I', buffer[:4])[0]
-                    if len(buffer) < 4 + msg_len:
-                        break  # Wait for more data
-
-                    msg_data = bytes(buffer[4:4+msg_len])
-                    buffer = buffer[4+msg_len:]
-
-                    self._parse_message(msg_data)
-
-            except socket.timeout:
+    def _worker(self):
+        """Connect -> receive (TCP + UDP) -> on loss, reconnect with backoff."""
+        backoff = 1.0
+        while self.running:
+            if not self._open():
+                self._set_connected(False)
+                time.sleep(backoff)
+                backoff = min(backoff * 2.0, 10.0)
                 continue
-            except Exception as e:
-                if self.running:
-                    logger.error(f"Receive error: {e}")
-                break
+            backoff = 1.0
+            self.last_rx_time = time.time()
+            self._set_connected(True)
+            self._receive_until_lost()
+            self._set_connected(False)
+            self._close_sockets()
+            if self.running:
+                time.sleep(1.0)
 
-    def _udp_receive_loop(self):
-        """Background thread to receive sensor telemetry over UDP.
-
-        Each datagram is one complete message in the same wire format used on
-        TCP: a 4-byte big-endian length prefix followed by the protobuf payload
-        (see SangamIO udp_publisher.rs). UDP is message-oriented, so there is
-        exactly one length-prefixed message per datagram.
-        """
-        while self.running and self.udp_socket:
+    def _receive_until_lost(self):
+        """Read the UDP telemetry stream and watch the TCP channel for close,
+        until the connection drops or telemetry stalls (watchdog). Each UDP
+        datagram is one length-prefixed protobuf message (see udp_publisher.rs)."""
+        tcp_buffer = bytearray()
+        while self.running:
             try:
-                datagram, _addr = self.udp_socket.recvfrom(65535)
-            except socket.timeout:
-                continue
-            except Exception as e:
-                if self.running:
-                    logger.error(f"UDP receive error: {e}")
-                break
+                socks = [s for s in (self.socket, self.udp_socket) if s is not None]
+                readable, _, _ = select.select(socks, [], [], 0.5)
+            except Exception:
+                return  # a socket was closed underneath us -> reconnect
 
-            if len(datagram) < 4:
-                continue
-            msg_len = struct.unpack('>I', datagram[:4])[0]
-            self._parse_message(datagram[4:4 + msg_len])
+            now = time.time()
+            for s in readable:
+                if s is self.udp_socket:
+                    try:
+                        datagram, _addr = s.recvfrom(65535)
+                    except Exception:
+                        continue
+                    if datagram and len(datagram) >= 4:
+                        self.last_rx_time = now
+                        msg_len = struct.unpack('>I', datagram[:4])[0]
+                        self._parse_message(datagram[4:4 + msg_len])
+                elif s is self.socket:
+                    try:
+                        data = s.recv(4096)
+                    except Exception:
+                        return
+                    if not data:
+                        logger.warning("SangamIO closed the TCP connection")
+                        return
+                    # TCP is commands-only, but parse any framed messages defensively.
+                    tcp_buffer.extend(data)
+                    while len(tcp_buffer) >= 4:
+                        mlen = struct.unpack('>I', tcp_buffer[:4])[0]
+                        if len(tcp_buffer) < 4 + mlen:
+                            break
+                        self._parse_message(bytes(tcp_buffer[4:4 + mlen]))
+                        tcp_buffer = tcp_buffer[4 + mlen:]
+
+            # Watchdog: telemetry has gone silent -> drop and reconnect.
+            if now - self.last_rx_time > self.telemetry_timeout:
+                logger.warning(
+                    f"No telemetry for {self.telemetry_timeout:.1f}s; reconnecting")
+                return
 
     def _parse_message(self, data: bytes):
         """Parse a protobuf message from SangamIO.
@@ -576,16 +606,18 @@ class SangamIOClient:
     # Command methods
 
     def send_command(self, command_bytes: bytes):
-        """Send a command to SangamIO."""
-        if not self.socket:
+        """Send a length-prefixed command over the TCP channel. Reconnect-safe:
+        grabs the current socket and serializes concurrent sends."""
+        sock = self.socket
+        if sock is None:
             return False
         try:
-            # Length-prefix the message
             msg = struct.pack('>I', len(command_bytes)) + command_bytes
-            self.socket.sendall(msg)
+            with self.send_lock:
+                sock.sendall(msg)
             return True
         except Exception as e:
-            logger.error(f"Send error: {e}")
+            logger.warning(f"Send error: {e}")
             return False
 
     def _build_component_control(self, component_id: str, action_type: int,

@@ -122,13 +122,19 @@ class VacuumBridgeNode(Node):
         self.last_scan_time = None
         self.scan_period = 0.2  # seconds; seeded at ~5 Hz, updated from measurement
 
-        # Connect to robot
-        self.get_logger().info(f'Connecting to SangamIO at {robot_ip}:{robot_port}...')
-        if self.client.connect():
-            self.client.start_receiving()
+        # Start the self-healing connection (connects + auto-reconnects with
+        # backoff on close, and re-registers if the UDP telemetry stalls).
+        self.client.on_status(self._on_conn_status)
+        self.get_logger().info(
+            f'Connecting to SangamIO at {robot_ip}:{robot_port} (auto-reconnect)...')
+        self.client.start()
+
+    def _on_conn_status(self, connected: bool):
+        """Connection-status callback from the client worker thread."""
+        if connected:
             self.get_logger().info('Connected to SangamIO')
         else:
-            self.get_logger().error('Failed to connect to SangamIO')
+            self.get_logger().warn('Disconnected from SangamIO; reconnecting...')
 
     def _on_sensor_update(self, topic: str, data: SensorData):
         """Handle sensor data update from SangamIO."""
