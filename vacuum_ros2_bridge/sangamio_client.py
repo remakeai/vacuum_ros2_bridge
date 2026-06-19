@@ -374,9 +374,16 @@ class SangamIOClient:
         elif field_num == 2 and wire_type == 0:  # u32
             val, _ = self._read_varint(data, idx)
             return val
-        elif field_num == 4 and wire_type == 0:  # i32
+        elif field_num == 4 and wire_type == 0:  # i32 (proto int32: two's-complement varint)
             val, _ = self._read_varint(data, idx)
-            # Handle signed zigzag
+            # Negative int32 is varint-encoded sign-extended to 64 bits; decode signed.
+            if val >= (1 << 63):
+                val -= (1 << 64)
+            return val
+        elif field_num == 5 and wire_type == 0:  # i64 (proto int64)
+            val, _ = self._read_varint(data, idx)
+            if val >= (1 << 63):
+                val -= (1 << 64)
             return val
         elif field_num == 6 and wire_type == 5:  # f32
             return struct.unpack('<f', data[idx:idx+4])[0]
@@ -522,23 +529,28 @@ class SangamIOClient:
         if 'wheel_right' in values:
             self.sensor_data.wheel_right = int(values['wheel_right'])
 
-        # IMU - gyro
-        if 'gyro' in values and isinstance(values['gyro'], tuple):
-            self.sensor_data.gyro_x = values['gyro'][0]
-            self.sensor_data.gyro_y = values['gyro'][1]
-            self.sensor_data.gyro_z = values['gyro'][2]
+        # IMU - SangamIO sends each axis as a separate scalar (gyro_x/y/z,
+        # accel_x/y/z, tilt_x/y/z), not a Vector3. See SangamIO gd32/reader.rs.
+        if 'gyro_x' in values:
+            self.sensor_data.gyro_x = values['gyro_x']
+        if 'gyro_y' in values:
+            self.sensor_data.gyro_y = values['gyro_y']
+        if 'gyro_z' in values:
+            self.sensor_data.gyro_z = values['gyro_z']
 
-        # IMU - accel
-        if 'accel' in values and isinstance(values['accel'], tuple):
-            self.sensor_data.accel_x = values['accel'][0]
-            self.sensor_data.accel_y = values['accel'][1]
-            self.sensor_data.accel_z = values['accel'][2]
+        if 'accel_x' in values:
+            self.sensor_data.accel_x = values['accel_x']
+        if 'accel_y' in values:
+            self.sensor_data.accel_y = values['accel_y']
+        if 'accel_z' in values:
+            self.sensor_data.accel_z = values['accel_z']
 
-        # Tilt
-        if 'tilt' in values and isinstance(values['tilt'], tuple):
-            self.sensor_data.tilt_x = values['tilt'][0]
-            self.sensor_data.tilt_y = values['tilt'][1]
-            self.sensor_data.tilt_z = values['tilt'][2]
+        if 'tilt_x' in values:
+            self.sensor_data.tilt_x = values['tilt_x']
+        if 'tilt_y' in values:
+            self.sensor_data.tilt_y = values['tilt_y']
+        if 'tilt_z' in values:
+            self.sensor_data.tilt_z = values['tilt_z']
 
     def _update_lidar(self, values: dict):
         """Update LiDAR data."""
