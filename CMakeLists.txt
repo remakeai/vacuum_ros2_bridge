@@ -48,6 +48,7 @@ install(FILES
 # Install Python scripts
 install(PROGRAMS
   scripts/bridge_node.py
+  scripts/calibrate_velocity.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
