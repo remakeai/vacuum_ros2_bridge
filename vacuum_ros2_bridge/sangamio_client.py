@@ -92,8 +92,16 @@ class SangamIOClient:
         # where udp_streaming_port defaults to the TCP bind port. TCP is
         # commands-only and its open connection registers us for UDP streaming.
         self.udp_port = udp_port if udp_port is not None else port
-        # Reconnect if no UDP telemetry arrives for this long (seconds).
+        # Reconnect if no telemetry arrives for this long (seconds).
         self.telemetry_timeout = 3.0
+        # If no telemetry arrives within this shorter window, first ask SangamIO to
+        # switch this client to TCP telemetry (NAT/remote fallback) before giving up
+        # and reconnecting. Must be < telemetry_timeout.
+        self.udp_fallback_after = 1.5
+        # Sticky once TCP telemetry has worked: request it immediately on (re)connect
+        # so remote sessions don't re-pay the UDP-silence wait on every reconnect.
+        # Reset whenever a UDP datagram is seen (we're back on a network where UDP works).
+        self._prefer_tcp = False
         self.socket: Optional[socket.socket] = None
         self.udp_socket: Optional[socket.socket] = None
         self.running = False
@@ -204,10 +212,19 @@ class SangamIOClient:
                 time.sleep(1.0)
 
     def _receive_until_lost(self):
-        """Read the UDP telemetry stream and watch the TCP channel for close,
-        until the connection drops or telemetry stalls (watchdog). Each UDP
-        datagram is one length-prefixed protobuf message (see udp_publisher.rs)."""
+        """Read telemetry from UDP (fast path) and/or the TCP channel, until the
+        connection drops or telemetry stalls. Each frame -- a UDP datagram or a
+        TCP framed message -- is one length-prefixed protobuf message (see
+        udp_publisher.rs). If UDP telemetry does not arrive (e.g. the client is
+        behind NAT / remote), ask SangamIO to stream over TCP instead, which
+        traverses NAT exactly like the command channel already does."""
         tcp_buffer = bytearray()
+        requested_tcp = False
+        # Sticky fast-path: if TCP telemetry worked before, request it up front so
+        # we don't re-pay the UDP-silence wait on this (re)connection.
+        if self._prefer_tcp:
+            self.request_tcp_telemetry()
+            requested_tcp = True
         while self.running:
             try:
                 socks = [s for s in (self.socket, self.udp_socket) if s is not None]
@@ -224,6 +241,7 @@ class SangamIOClient:
                         continue
                     if datagram and len(datagram) >= 4:
                         self.last_rx_time = now
+                        self._prefer_tcp = False  # UDP works here -> prefer it
                         msg_len = struct.unpack('>I', datagram[:4])[0]
                         self._parse_message(datagram[4:4 + msg_len])
                 elif s is self.socket:
@@ -234,17 +252,26 @@ class SangamIOClient:
                     if not data:
                         logger.warning("SangamIO closed the TCP connection")
                         return
-                    # TCP is commands-only, but parse any framed messages defensively.
+                    # TCP carries command traffic and, after a TCP-telemetry
+                    # fallback, the sensor stream -- same [len][protobuf] framing.
                     tcp_buffer.extend(data)
                     while len(tcp_buffer) >= 4:
                         mlen = struct.unpack('>I', tcp_buffer[:4])[0]
                         if len(tcp_buffer) < 4 + mlen:
                             break
+                        self.last_rx_time = now  # TCP telemetry feeds the watchdog
                         self._parse_message(bytes(tcp_buffer[4:4 + mlen]))
                         tcp_buffer = tcp_buffer[4 + mlen:]
 
-            # Watchdog: telemetry has gone silent -> drop and reconnect.
-            if now - self.last_rx_time > self.telemetry_timeout:
+            # Two-stage watchdog: first try a TCP-telemetry fallback, then give up.
+            silent = now - self.last_rx_time
+            if silent > self.udp_fallback_after and not requested_tcp:
+                logger.info(
+                    f"No telemetry for {silent:.1f}s; requesting TCP-telemetry fallback")
+                self.request_tcp_telemetry()
+                requested_tcp = True
+                self._prefer_tcp = True
+            elif silent > self.telemetry_timeout:
                 logger.warning(
                     f"No telemetry for {self.telemetry_timeout:.1f}s; reconnecting")
                 return
@@ -777,3 +804,17 @@ class SangamIOClient:
         action = 0 if enabled else 1  # ENABLE or DISABLE
         cmd = self._build_component_control("lidar", action)
         return self.send_command(cmd)
+
+    # Telemetry transport control (UDP is the low-latency LAN default; TCP is a
+    # fallback for clients behind NAT / remote where UDP unicast can't get back).
+    # "telemetry" is a reserved pseudo-component intercepted by SangamIO's TCP
+    # receiver and not forwarded to the device driver.
+
+    def request_tcp_telemetry(self) -> bool:
+        """Ask SangamIO to stream sensor telemetry over this TCP connection
+        instead of UDP. ENABLE = TCP."""
+        return self.send_command(self._build_component_control("telemetry", 0))
+
+    def request_udp_telemetry(self) -> bool:
+        """Ask SangamIO to go back to UDP telemetry. DISABLE = UDP."""
+        return self.send_command(self._build_component_control("telemetry", 1))
