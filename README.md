@@ -6,6 +6,8 @@ Tutorial: Step-by-step [root &amp; setup tutorial](https://makerspet.com/blog/tu
 
 Tutorial: Step-by-step [bringup &amp; SLAM tutorial](https://makerspet.com/blog/tutorial-part-2-drive-map-navigate-your-proscenic-m6-pro-in-ros-2/)
 
+Tutorial: Step-by-step [simulate in Gazebo](https://makerspet.com/blog/simulate-the-proscenic-m6-pro-robot-vacuum-in-gazebo-with-ros-2/)
+
 
 ## Overview
 
