@@ -1,6 +1,11 @@
 # vacuum_ros2_bridge
 
-ROS2 Jazzy bridge for 3irobotix CRL200-based vacuum robot cleaners. This package enables communication between ROS2 PC and vacuum using a SangamIO firmware shim (part of [VacuumTiger](https://github.com/codetiger/VacuumTiger)). Read [step-by-step setup tutorial](https://makerspet.com/blog/tutorial-connect-robot-vacuum-cleaner-to-ros-2-proscenic-m6-pro/).
+ROS2 Jazzy bridge for 3irobotix CRL200-based vacuum robot cleaners. This package enables communication between ROS2 PC and vacuum using a [SangamIO firmware](https://github.com/codetiger/VacuumTiger) shim.
+
+Tutorial: Step-by-step [root &amp; setup tutorial](https://makerspet.com/blog/tutorial-connect-robot-vacuum-cleaner-to-ros-2-proscenic-m6-pro/)
+
+Tutorial: Step-by-step [bringup &amp; SLAM tutorial](https://makerspet.com/blog/tutorial-part-2-drive-map-navigate-your-proscenic-m6-pro-in-ros-2/)
+
 
 ## Overview
 
@@ -11,6 +16,9 @@ The bridge connects to [SangamIO](https://github.com/codetiger/VacuumTiger) via 
 - **Standard interfaces**: Uses `sensor_msgs`, `geometry_msgs`, `nav_msgs` for compatibility with the ROS2 ecosystem
 
 <img width="1024" height="1024" alt="proscenic_m6_pro_ros2_floor-1024x1024" src="https://github.com/user-attachments/assets/162ab9e1-c27c-4ef7-b685-2c03b275a691" />
+
+<img width="1357" height="1096" alt="proscenic_m6pro_rviz" src="https://github.com/user-attachments/assets/39b5bde5-d8f8-4827-ba0f-62da7f46864c" />
+
 
 ## Prerequisites
 
