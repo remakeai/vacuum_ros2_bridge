@@ -31,8 +31,9 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from std_msgs.msg import Header
 from sensor_msgs.msg import LaserScan, Imu, BatteryState
-from geometry_msgs.msg import Twist, Quaternion, Vector3
+from geometry_msgs.msg import Twist, Quaternion, Vector3, TransformStamped
 from nav_msgs.msg import Odometry
+from tf2_ros import TransformBroadcaster
 
 # Custom messages (will be available after building)
 from vacuum_ros2_bridge.msg import Bumper, Cliff, VacuumStatus, ActuatorCommand, LedCommand
@@ -61,6 +62,7 @@ class VacuumBridgeNode(Node):
         self.declare_parameter('frame_id', 'base_link')
         self.declare_parameter('odom_frame_id', 'odom')
         self.declare_parameter('lidar_frame_id', 'laser')
+        self.declare_parameter('publish_tf', False)
 
         # Get parameters
         robot_ip = self.get_parameter('robot_ip').value
@@ -68,6 +70,7 @@ class VacuumBridgeNode(Node):
         self.frame_id = self.get_parameter('frame_id').value
         self.odom_frame_id = self.get_parameter('odom_frame_id').value
         self.lidar_frame_id = self.get_parameter('lidar_frame_id').value
+        self.publish_tf = self.get_parameter('publish_tf').value
 
         # SangamIO client
         self.client = SangamIOClient(robot_ip, robot_port)
@@ -92,6 +95,13 @@ class VacuumBridgeNode(Node):
         self.bumper_pub = self.create_publisher(Bumper, '/bumper', sensor_qos)
         self.cliff_pub = self.create_publisher(Cliff, '/cliff', sensor_qos)
         self.status_pub = self.create_publisher(VacuumStatus, '/vacuum_status', 10)
+
+        # Optional odom -> base TF broadcaster. Off by default: when the
+        # robot_localization EKF runs, it owns the odom -> base_footprint
+        # transform. Enable (publish_tf:=true) to broadcast it straight from
+        # wheel odometry instead -- no EKF in the graph (e.g. while IMU fusion
+        # is on hold, or for simpler debugging).
+        self.tf_broadcaster = TransformBroadcaster(self) if self.publish_tf else None
 
         # Subscribers
         self.cmd_vel_sub = self.create_subscription(
@@ -315,6 +325,18 @@ class VacuumBridgeNode(Node):
         msg.twist.covariance[35] = 0.01  # vth
 
         self.odom_pub.publish(msg)
+
+        # Broadcast odom -> base TF from the same pose (when no EKF is running).
+        if self.tf_broadcaster is not None:
+            t = TransformStamped()
+            t.header.stamp = stamp
+            t.header.frame_id = self.odom_frame_id
+            t.child_frame_id = self.frame_id
+            t.transform.translation.x = self.x
+            t.transform.translation.y = self.y
+            t.transform.translation.z = 0.0
+            t.transform.rotation = msg.pose.pose.orientation
+            self.tf_broadcaster.sendTransform(t)
 
     def _publish_bumper(self, data: SensorData, stamp):
         """Publish bumper message."""

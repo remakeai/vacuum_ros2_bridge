@@ -4,6 +4,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -40,6 +41,13 @@ def generate_launch_description():
         description='LiDAR frame ID'
     )
 
+    publish_tf_arg = DeclareLaunchArgument(
+        'publish_tf',
+        default_value='false',
+        description='Broadcast odom -> base TF from wheel odometry. Use when no '
+                    'external node (e.g. robot_localization EKF) provides it.'
+    )
+
     # Bridge node
     bridge_node = Node(
         package='vacuum_ros2_bridge',
@@ -52,6 +60,8 @@ def generate_launch_description():
             'frame_id': LaunchConfiguration('frame_id'),
             'odom_frame_id': LaunchConfiguration('odom_frame_id'),
             'lidar_frame_id': LaunchConfiguration('lidar_frame_id'),
+            'publish_tf': ParameterValue(LaunchConfiguration('publish_tf'),
+                                         value_type=bool),
         }]
     )
 
@@ -61,5 +71,6 @@ def generate_launch_description():
         frame_id_arg,
         odom_frame_id_arg,
         lidar_frame_id_arg,
+        publish_tf_arg,
         bridge_node,
     ])
