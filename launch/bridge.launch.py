@@ -48,6 +48,20 @@ def generate_launch_description():
                     'external node (e.g. robot_localization EKF) provides it.'
     )
 
+    scan_time_offset_arg = DeclareLaunchArgument(
+        'scan_time_offset',
+        default_value='0.0',
+        description='Seconds added to each /scan stamp (negative back-dates it to '
+                    'when measured, fixing scan lag during rotation).'
+    )
+
+    scan_mask_deg_arg = DeclareLaunchArgument(
+        'scan_mask_deg',
+        default_value='',
+        description="Fixed-pattern-noise mask, 'min1,max1,min2,max2,...' in degrees; "
+                    "those LiDAR bins are dropped. Ranges may wrap 0."
+    )
+
     # Bridge node
     bridge_node = Node(
         package='vacuum_ros2_bridge',
@@ -62,6 +76,9 @@ def generate_launch_description():
             'lidar_frame_id': LaunchConfiguration('lidar_frame_id'),
             'publish_tf': ParameterValue(LaunchConfiguration('publish_tf'),
                                          value_type=bool),
+            'scan_time_offset': ParameterValue(
+                LaunchConfiguration('scan_time_offset'), value_type=float),
+            'scan_mask_deg': LaunchConfiguration('scan_mask_deg'),
         }]
     )
 
@@ -72,5 +89,7 @@ def generate_launch_description():
         odom_frame_id_arg,
         lidar_frame_id_arg,
         publish_tf_arg,
+        scan_time_offset_arg,
+        scan_mask_deg_arg,
         bridge_node,
     ])

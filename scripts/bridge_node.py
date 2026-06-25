@@ -27,6 +27,7 @@ Services:
 import math
 import rclpy
 from rclpy.node import Node
+from rclpy.duration import Duration
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from std_msgs.msg import Header
@@ -63,6 +64,15 @@ class VacuumBridgeNode(Node):
         self.declare_parameter('odom_frame_id', 'odom')
         self.declare_parameter('lidar_frame_id', 'laser')
         self.declare_parameter('publish_tf', False)
+        # Seconds added to each /scan stamp. The LiDAR data is older than the
+        # moment we publish it (sensor + transport + assembly delay), so a small
+        # NEGATIVE value back-dates the scan to when it was actually measured and
+        # stops points from lagging the robot during rotation. Calibrate per robot.
+        self.declare_parameter('scan_time_offset', 0.0)
+        # Fixed-pattern-noise mask: 'min1,max1,min2,max2,...' in degrees. Those
+        # LiDAR angle bins are dropped (set to inf) -- e.g. the enclosure posts
+        # around the puck that return a constant false point. Ranges may wrap 0.
+        self.declare_parameter('scan_mask_deg', '')
 
         # Get parameters
         robot_ip = self.get_parameter('robot_ip').value
@@ -71,6 +81,9 @@ class VacuumBridgeNode(Node):
         self.odom_frame_id = self.get_parameter('odom_frame_id').value
         self.lidar_frame_id = self.get_parameter('lidar_frame_id').value
         self.publish_tf = self.get_parameter('publish_tf').value
+        self.scan_time_offset = self.get_parameter('scan_time_offset').value
+        self.scan_masked = self._build_scan_mask(
+            self.get_parameter('scan_mask_deg').value)
 
         # SangamIO client
         self.client = SangamIOClient(robot_ip, robot_port)
@@ -168,6 +181,28 @@ class VacuumBridgeNode(Node):
         # Publish vacuum status
         self._publish_status(data, now)
 
+    def _build_scan_mask(self, spec: str):
+        """Parse 'min1,max1,min2,max2,...' (degrees) into a 360-entry bool mask of
+        LiDAR bins to drop (fixed-pattern noise, e.g. enclosure posts). A range may
+        wrap past 0 (e.g. '355,5' masks 355..359 and 0..5)."""
+        masked = [False] * 360
+        try:
+            nums = [float(x) for x in str(spec).split(',') if x.strip() != '']
+        except ValueError:
+            self.get_logger().warn(f"Bad scan_mask_deg '{spec}'; ignoring")
+            return masked
+        pairs = list(zip(nums[0::2], nums[1::2]))
+        for lo, hi in pairs:
+            lo_i, hi_i = int(math.floor(lo)), int(math.ceil(hi))
+            bins = (range(lo_i, hi_i + 1) if lo <= hi
+                    else list(range(lo_i, 360)) + list(range(0, hi_i + 1)))
+            for i in bins:
+                masked[i % 360] = True
+        if pairs:
+            self.get_logger().info(
+                f"Scan angle mask {pairs} deg -> {sum(masked)} bins excluded")
+        return masked
+
     def _on_lidar_scan(self, points: list, rpm: float):
         """Handle LiDAR scan from SangamIO."""
         if not points:
@@ -186,7 +221,8 @@ class VacuumBridgeNode(Node):
         self.last_scan_time = now_time
 
         msg = LaserScan()
-        msg.header.stamp = now
+        # Back-date (or advance) the scan to when it was actually measured.
+        msg.header.stamp = (now_time + Duration(seconds=self.scan_time_offset)).to_msg()
         msg.header.frame_id = self.lidar_frame_id
 
         # LiDAR parameters
@@ -207,6 +243,10 @@ class VacuumBridgeNode(Node):
             # Convert angle to index (0-359)
             angle_deg = math.degrees(point.angle_rad) % 360
             idx = int(angle_deg) % 360
+
+            # Drop fixed-pattern-noise bins (left as inf / no return)
+            if self.scan_masked[idx]:
+                continue
 
             # Only update if this is a valid measurement
             if 0 < point.distance_m < msg.range_max:
