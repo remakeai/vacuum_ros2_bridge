@@ -9,6 +9,7 @@ Protocol:
 import socket
 import select
 import struct
+import math
 import threading
 import time
 from dataclasses import dataclass, field
@@ -452,6 +453,9 @@ class SangamIOClient:
         elif field_num == 11 and wire_type == 2:  # PointCloud2D
             length, idx = self._read_varint(data, idx)
             return self._parse_pointcloud(data[idx:idx+length])
+        elif field_num == 9 and wire_type == 2:  # bytes (packed scan blob)
+            length, idx = self._read_varint(data, idx)
+            return bytes(data[idx:idx+length])
 
         return None
 
@@ -611,10 +615,37 @@ class SangamIOClient:
 
     def _update_lidar(self, values: dict):
         """Update LiDAR data."""
-        if 'scan' in values and isinstance(values['scan'], list):
+        if 'scan_packed' in values and isinstance(
+                values['scan_packed'], (bytes, bytearray)):
+            self.sensor_data.lidar_points = self._unpack_packed_scan(
+                values['scan_packed'])
+        elif 'scan' in values and isinstance(values['scan'], list):  # legacy
             self.sensor_data.lidar_points = values['scan']
         if 'rpm' in values:
             self.sensor_data.lidar_rpm = float(values['rpm'])
+
+    @staticmethod
+    def _unpack_packed_scan(blob: bytes) -> list:
+        """Unpack SangamIO's packed scan (see delta2d/mod.rs publish_scan):
+        u16 num_bins, then per bin u16 distance (0.25mm units, 0 = no return) +
+        u8 quality, little-endian. Bin i is angle i*2pi/num_bins. The raw->meters
+        conversion (x0.00025) happens here on the PC, not on the robot."""
+        if len(blob) < 2:
+            return []
+        num_bins = struct.unpack_from('<H', blob, 0)[0]
+        if num_bins == 0:
+            return []
+        inc = 2.0 * math.pi / num_bins
+        points = []
+        off = 2
+        for i in range(num_bins):
+            if off + 3 > len(blob):
+                break
+            dist_raw, quality = struct.unpack_from('<HB', blob, off)
+            off += 3
+            if dist_raw > 0:
+                points.append(LidarPoint(i * inc, dist_raw * 0.00025, quality))
+        return points
 
     @staticmethod
     def _read_varint(data: bytes, idx: int) -> tuple:
