@@ -10,3 +10,11 @@ vacuum_bridge:
     frame_id: "base_link"       # Robot base frame
     odom_frame_id: "odom"       # Odometry frame
     lidar_frame_id: "laser"     # LiDAR frame
+
+    # Robot kinematics overrides (0 = use the value the robot advertises in
+    # the SangamIO `kinematics` group). See README "Robot Parameters".
+    # wheel_m_per_tick: 0.0
+    # wheel_track_m: 0.0
+    # wheel_tick_bits: 0
+    # gyro_rad_per_lsb: 0.0
+    # accel_mps2_per_lsb: 0.0

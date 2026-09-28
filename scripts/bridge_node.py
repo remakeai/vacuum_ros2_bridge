@@ -29,6 +29,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rcl_interfaces.msg import ParameterDescriptor
 
 from std_msgs.msg import Header
 from sensor_msgs.msg import LaserScan, Imu, BatteryState
@@ -50,9 +51,16 @@ from vacuum_ros2_bridge.sangamio_client import SangamIOClient, SensorData
 class VacuumBridgeNode(Node):
     """ROS2 bridge node for SangamIO vacuum robot."""
 
-    # Robot physical parameters
-    WHEEL_BASE = 0.233  # meters
-    TICKS_PER_METER = 4464.0  # encoder ticks per meter
+    # Drive/IMU geometry used until the robot advertises its own via the
+    # SangamIO `kinematics` group (older SangamIO builds never do). These are
+    # the CRL-200S (Proscenic M6 Pro) values.
+    DEFAULT_KINEMATICS = {
+        'wheel_m_per_tick': 1.0 / 4464.0,  # encoder ticks -> meters
+        'wheel_track_m': 0.233,  # distance between wheels
+        'wheel_tick_bits': 16,  # encoder counters wrap at 2^bits
+        'gyro_rad_per_lsb': math.radians(0.061),  # 2000 dps over int16
+        'accel_mps2_per_lsb': 2.0 * 9.81 / 32768.0,  # 2 g over int16
+    }
 
     def __init__(self):
         super().__init__('vacuum_bridge')
@@ -73,6 +81,11 @@ class VacuumBridgeNode(Node):
         # LiDAR angle bins are dropped (set to inf) -- e.g. the enclosure posts
         # around the puck that return a constant false point. Ranges may wrap 0.
         self.declare_parameter('scan_mask_deg', '')
+        # Per-parameter overrides of the robot's advertised kinematics (e.g.
+        # after calibrating wheel scale). 0 = use the robot's value.
+        for key in self.DEFAULT_KINEMATICS:
+            self.declare_parameter(
+                key, 0.0, ParameterDescriptor(dynamic_typing=True))
 
         # Get parameters
         robot_ip = self.get_parameter('robot_ip').value
@@ -84,11 +97,18 @@ class VacuumBridgeNode(Node):
         self.scan_time_offset = self.get_parameter('scan_time_offset').value
         self.scan_masked = self._build_scan_mask(
             self.get_parameter('scan_mask_deg').value)
+        self.kinematics_overrides = {
+            key: float(self.get_parameter(key).value)
+            for key in self.DEFAULT_KINEMATICS
+            if float(self.get_parameter(key).value) > 0.0}
+        self.robot_kinematics = None  # last `kinematics` group from SangamIO
+        self._apply_kinematics({})
 
         # SangamIO client
         self.client = SangamIOClient(robot_ip, robot_port)
         self.client.on_sensor_update(self._on_sensor_update)
         self.client.on_lidar_scan(self._on_lidar_scan)
+        self.client.on_kinematics(self._on_kinematics)
 
         # QoS profiles. Use RELIABLE so the topics are compatible with the
         # default (reliable) subscribers in the Kaia.ai stack (cartographer,
@@ -181,6 +201,43 @@ class VacuumBridgeNode(Node):
         # Publish vacuum status
         self._publish_status(data, now)
 
+    def _apply_kinematics(self, advertised: dict):
+        """Resolve each kinematics value: ROS parameter override, else the
+        robot's advertised value, else the CRL-200S default. An absent
+        accel_mps2_per_lsb from a robot that advertises kinematics means its
+        accelerometer scale is unknown, so acceleration is not published."""
+        k = dict(self.DEFAULT_KINEMATICS)
+        if advertised:
+            k['accel_mps2_per_lsb'] = None
+        for key, value in advertised.items():
+            if key in k and isinstance(value, (int, float)) and value > 0:
+                k[key] = float(value)
+        k.update(self.kinematics_overrides)
+        self.wheel_m_per_tick = k['wheel_m_per_tick']
+        self.wheel_track_m = k['wheel_track_m']
+        self.tick_modulus = 1 << int(k['wheel_tick_bits'])
+        self.gyro_scale = k['gyro_rad_per_lsb']
+        self.accel_scale = k['accel_mps2_per_lsb']
+        return k
+
+    def _on_kinematics(self, values: dict):
+        """Handle the robot's `kinematics` group (resent every few seconds)."""
+        advertised = {key: values[key] for key in self.DEFAULT_KINEMATICS
+                      if key in values}
+        if advertised == self.robot_kinematics:
+            return
+        self.robot_kinematics = advertised
+        k = self._apply_kinematics(advertised)
+        # Re-baseline odometry so ticks read under the old scale or counter
+        # width are not differenced under the new one.
+        self.last_left_ticks = None
+        self.last_right_ticks = None
+        self.get_logger().info(
+            'Robot kinematics: '
+            + ', '.join(f'{key}={k[key]}' for key in self.DEFAULT_KINEMATICS)
+            + (f' (overridden: {sorted(self.kinematics_overrides)})'
+               if self.kinematics_overrides else ''))
+
     def _build_scan_mask(self, spec: str):
         """Parse 'min1,max1,min2,max2,...' (degrees) into a 360-entry bool mask of
         LiDAR bins to drop (fixed-pattern noise, e.g. enclosure posts). A range may
@@ -264,24 +321,24 @@ class VacuumBridgeNode(Node):
         msg.header.stamp = stamp
         msg.header.frame_id = self.frame_id
 
-        # Angular velocity (rad/s) - raw values need scaling
-        # Typical gyro scale: 2000 dps full scale, 16-bit = 2000/32768 = 0.061 dps/LSB
-        GYRO_SCALE = 0.061 * math.pi / 180.0  # Convert to rad/s
-        msg.angular_velocity.x = data.gyro_x * GYRO_SCALE
-        msg.angular_velocity.y = data.gyro_y * GYRO_SCALE
-        msg.angular_velocity.z = data.gyro_z * GYRO_SCALE
+        # Angular velocity (rad/s) from raw counts, per the robot's kinematics
+        msg.angular_velocity.x = data.gyro_x * self.gyro_scale
+        msg.angular_velocity.y = data.gyro_y * self.gyro_scale
+        msg.angular_velocity.z = data.gyro_z * self.gyro_scale
 
-        # Linear acceleration (m/s^2) - raw values need scaling
-        # Typical accel scale: 2g full scale, 16-bit = 2*9.81/32768 = 0.0006 m/s²/LSB
-        ACCEL_SCALE = 2.0 * 9.81 / 32768.0
-        msg.linear_acceleration.x = data.accel_x * ACCEL_SCALE
-        msg.linear_acceleration.y = data.accel_y * ACCEL_SCALE
-        msg.linear_acceleration.z = data.accel_z * ACCEL_SCALE
+        # Linear acceleration (m/s^2); -1 covariance marks it as not provided
+        # when the robot's accelerometer scale is unknown.
+        if self.accel_scale:
+            msg.linear_acceleration.x = data.accel_x * self.accel_scale
+            msg.linear_acceleration.y = data.accel_y * self.accel_scale
+            msg.linear_acceleration.z = data.accel_z * self.accel_scale
+            msg.linear_acceleration_covariance[0] = 0.1
+        else:
+            msg.linear_acceleration_covariance[0] = -1.0
 
         # Covariance (unknown, use -1)
         msg.orientation_covariance[0] = -1.0
         msg.angular_velocity_covariance[0] = 0.01
-        msg.linear_acceleration_covariance[0] = 0.1
 
         self.imu_pub.publish(msg)
 
@@ -296,24 +353,24 @@ class VacuumBridgeNode(Node):
             self.last_odom_time = self.get_clock().now()
             return
 
-        # Handle tick wraparound (u16)
+        # Handle tick counter wraparound (2^wheel_tick_bits)
+        modulus = self.tick_modulus
+
         def tick_diff(new, old):
-            diff = new - old
-            if diff > 32768:
-                diff -= 65536
-            elif diff < -32768:
-                diff += 65536
+            diff = (new - old) % modulus
+            if diff >= modulus // 2:
+                diff -= modulus
             return diff
 
-        dl = tick_diff(left_ticks, self.last_left_ticks) / self.TICKS_PER_METER
-        dr = tick_diff(right_ticks, self.last_right_ticks) / self.TICKS_PER_METER
+        dl = tick_diff(left_ticks, self.last_left_ticks) * self.wheel_m_per_tick
+        dr = tick_diff(right_ticks, self.last_right_ticks) * self.wheel_m_per_tick
 
         self.last_left_ticks = left_ticks
         self.last_right_ticks = right_ticks
 
         # Compute odometry
         d = (dl + dr) / 2.0
-        dtheta = (dr - dl) / self.WHEEL_BASE
+        dtheta = (dr - dl) / self.wheel_track_m
 
         # Update pose
         self.x += d * math.cos(self.theta + dtheta / 2.0)

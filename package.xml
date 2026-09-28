@@ -15,6 +15,7 @@
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
+  <depend>rcl_interfaces</depend>
 
   <exec_depend>rosidl_default_runtime</exec_depend>
 

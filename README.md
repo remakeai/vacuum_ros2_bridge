@@ -202,12 +202,24 @@ The bridge uses three configurable frame IDs:
 
 ## Robot Parameters
 
-Default physical parameters used for odometry:
+The bridge has no robot-specific constants. Each SangamIO driver publishes a
+`kinematics` sensor group (SI units, resent every 2 s), and the bridge converts
+wheel ticks and IMU counts with it. This is how one bridge serves both the
+Proscenic M6 Pro (CRL-200S) and the Roborock S5 Max.
 
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| Wheel base | 0.233 m | Distance between wheels |
-| Ticks per meter | 4464 | Encoder resolution |
+| Parameter | Meaning | CRL-200S | S5 Max |
+|-----------|---------|----------|--------|
+| `wheel_m_per_tick` | Wheel travel per encoder tick (m) | 1/4464 | 0.000798 |
+| `wheel_track_m` | Distance between wheels (m) | 0.233 | 0.229 |
+| `wheel_tick_bits` | Encoder counters wrap at 2^bits | 16 | 16 |
+| `gyro_rad_per_lsb` | Gyro count to rad/s | 0.061 deg/s | 0.001 |
+| `accel_mps2_per_lsb` | Accel count to m/s² | 2 g / 32768 | not advertised |
+
+Any of these can be overridden with a ROS parameter of the same name (e.g.
+after calibrating the wheel scale); `0` means use the robot's value. If the
+robot runs an older SangamIO that publishes no `kinematics`, the CRL-200S
+values are used. When a robot advertises no accelerometer scale, `/imu`
+marks linear acceleration as not provided (covariance[0] = -1).
 
 ## Troubleshooting
 

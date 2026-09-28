@@ -122,6 +122,15 @@ class SangamIOClient:
         """Register callback for LiDAR scans."""
         self.callbacks['lidar'] = callback
 
+    def on_kinematics(self, callback: Callable[[dict], None]):
+        """Register callback for the robot's static drive/IMU geometry.
+
+        Called with the `kinematics` group values (SI units): wheel_m_per_tick,
+        wheel_track_m, wheel_tick_bits, gyro_rad_per_lsb and, when the robot
+        knows it, accel_mps2_per_lsb. SangamIO resends it every few seconds.
+        """
+        self.callbacks['kinematics'] = callback
+
     def on_status(self, callback: Callable[[bool], None]):
         """Register a connection-status callback, called with True on connect
         and False on disconnect."""
@@ -378,6 +387,10 @@ class SangamIOClient:
                 if 'lidar' in self.callbacks:
                     self.callbacks['lidar'](self.sensor_data.lidar_points,
                                            self.sensor_data.lidar_rpm)
+
+            elif 'kinematics' in topic:
+                if 'kinematics' in self.callbacks:
+                    self.callbacks['kinematics'](dict(values))
 
     def _parse_map_entry(self, data: bytes) -> tuple:
         """Parse a map entry (key-value pair)."""
