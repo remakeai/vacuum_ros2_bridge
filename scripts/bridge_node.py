@@ -284,8 +284,10 @@ class VacuumBridgeNode(Node):
 
         # LiDAR parameters
         msg.angle_min = 0.0
-        msg.angle_max = 2.0 * math.pi
         msg.angle_increment = 2.0 * math.pi / 360  # ~1 degree
+        # LaserScan endpoints are inclusive. With 360 one-degree bins, the
+        # last sample is at 359 degrees rather than the duplicated 360 degrees.
+        msg.angle_max = msg.angle_min + 359 * msg.angle_increment
         msg.scan_time = self.scan_period  # measured rotation period
         msg.time_increment = self.scan_period / 360.0  # per-bin time over one revolution
         msg.range_min = 0.15  # 15 cm
